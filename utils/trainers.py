@@ -40,15 +40,12 @@ def train(
                 batch.batch_edge_couples,
                 batch.num_nodes,
             )
-            ae_train_loader = DataLoader(
-                SequentialDataset(
-                    train_emb,
-                    window=window_size,
-                    step=int(window_size * step_percent),
-                    device=device,
-                ),
-                batch_size=ae_batch_size,
-                collate_fn=collate_fn,
+            ae_train_loader = _window_batches(
+                train_emb,
+                window_size,
+                int(window_size * step_percent),
+                ae_batch_size,
+                device,
             )
             accumulated_loss = torch.tensor(0.0, device=device)
             seq_count = 0
@@ -57,7 +54,7 @@ def train(
                 # Intentionally keep gradients through the target embedding. In our runs,
                 # this converged faster and worked better than a stop-gradient target.
                 loss = criterion(outputs, ae_batch)
-                loss = torch.sum(loss * mask) / torch.sum(mask)
+                loss = _masked_mean(loss, mask)
                 accumulated_loss += loss
                 seq_count += 1
 
@@ -167,7 +164,39 @@ def find_threshold(errors, labels=None, method="unsupervised", multiplier=10.0):
     return best_threshold
 
 
+def _window_batches(embeddings, window_size, step, ae_batch_size, device):
+    """
+    edge 埋め込みを transformer 入力の (窓バッチ, padding mask) の列にする
+
+    窓が重ならず全窓が完全なときは reshape 1 回で SequentialDataset + collate_fn と
+    同じ値になるので、その場合は padding mask を None にする
+    """
+    num_edges = embeddings.shape[0]
+    if step == window_size and num_edges > 0 and num_edges % window_size == 0:
+        # 毎バッチの DataLoader 構築と全 True mask の生成を省く。mask を None にすると
+        # 評価時に全 False の padding mask による nested tensor 変換も走らない
+        windows = embeddings.reshape(num_edges // window_size, window_size, -1)
+        return [(chunk, None) for chunk in windows.split(ae_batch_size)]
+    return DataLoader(
+        SequentialDataset(embeddings, window=window_size, step=step, device=device),
+        batch_size=ae_batch_size,
+        collate_fn=collate_fn,
+    )
+
+
+def _masked_mean(loss, mask):
+    if mask is None:
+        # 全 True mask の sum(loss * mask) / sum(mask) とビット一致させるため mean() は使わない
+        return torch.sum(loss) / loss.numel()
+    return torch.sum(loss * mask) / torch.sum(mask)
+
+
 def calculate_errors(outputs, batch, mask):
+    if mask is None:
+        # 全行が有効なので行の選別(と valid_mask.any() による同期)を省く
+        mean_errors = torch.sum((outputs - batch) ** 2, dim=-1) / outputs.shape[-1]
+        mean_errors = torch.nan_to_num(mean_errors, nan=0.0, posinf=1e6, neginf=-1e6)
+        return mean_errors.reshape(-1)
     squared_errors = ((outputs - batch) ** 2) * mask
     valid_mask = mask.sum(dim=-1) > 0
     valid_counts = torch.sum(mask, dim=-1)
@@ -206,12 +235,8 @@ def _collect_errors_and_labels(
                 batch.num_nodes,
             )
             labels.append(batch.edge_label.cpu())
-            ae_loader = DataLoader(
-                SequentialDataset(
-                    embeddings, window=window_size, step=window_size, device=device
-                ),
-                batch_size=ae_batch_size,
-                collate_fn=collate_fn,
+            ae_loader = _window_batches(
+                embeddings, window_size, window_size, ae_batch_size, device
             )
             accumulated_loss = torch.tensor(0.0, device=device)
             seq_count = 0
@@ -219,7 +244,7 @@ def _collect_errors_and_labels(
                 outputs = model.transformer(ae_batch, mask)
                 if compute_loss:
                     loss = criterion(outputs, ae_batch)
-                    loss = torch.sum(loss * mask) / torch.sum(mask)
+                    loss = _masked_mean(loss, mask)
                     accumulated_loss += loss
                 seq_count += 1
                 batch_errors = calculate_errors(outputs, ae_batch, mask)
