@@ -28,18 +28,10 @@ def train(
     cnt_wait = 0
     criterion = nn.MSELoss(reduction="none")
     for epoch in (pbar := tqdm(range(start_epoch + 1, num_epochs + 1), desc="Epochs")):
-        total_train_loss = 0
+        batch_losses = []
         model.train()
         for batch in train_loader:
-            batch.batch_edge_couples = batch.edge_label_index.t()
-            batch = batch.to(device)
-
-            train_emb = model.encoder(
-                batch.edge_index,
-                batch.edge_attr,
-                batch.batch_edge_couples,
-                batch.num_nodes,
-            )
+            train_emb, _ = _encode_batch(model, batch, device)
             ae_train_loader = _window_batches(
                 train_emb,
                 window_size,
@@ -61,11 +53,13 @@ def train(
             # Calculate the mean loss for the batch and backpropagate through both components
             if seq_count > 0:
                 loss = accumulated_loss / seq_count
-                total_train_loss += loss.item()
+                # .item() で毎バッチ GPU を待つと次バッチの読み込みと重ならないので epoch 末にまとめる
+                batch_losses.append(loss.detach())
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
+        total_train_loss = _sum_scalars(batch_losses)
         total_train_loss /= len(train_loader)
         val_loss, val_errors, val_labels = validate(
             model, val_loader, ae_batch_size, window_size, device
@@ -164,6 +158,27 @@ def find_threshold(errors, labels=None, method="unsupervised", multiplier=10.0):
     return best_threshold
 
 
+def _encode_batch(model, batch, device):
+    """
+    ローダのバッチから種エッジの埋め込みとラベル(CPU 上のまま)を返す
+    """
+    # encoder が使うテンソルだけを非同期で転送する。batch.to(device) の同期転送と
+    # 未使用属性(x, e_id 等)の転送を避け、GPU 計算と次バッチの読み込みを重ねる
+    edge_index = batch.edge_index.to(device, non_blocking=True)
+    edge_attr = batch.edge_attr.to(device, non_blocking=True)
+    edge_couples = batch.edge_label_index.to(device, non_blocking=True).t()
+    embeddings = model.encoder(edge_index, edge_attr, edge_couples, batch.num_nodes)
+    return embeddings, batch.edge_label
+
+
+def _sum_scalars(values):
+    # 従来の「total += loss.item()」と同じ順序の Python float 加算にして値を変えない
+    total = 0
+    for value in torch.stack(values).tolist() if values else []:
+        total += value
+    return total
+
+
 def _window_batches(embeddings, window_size, step, ae_batch_size, device):
     """
     edge 埋め込みを transformer 入力の (窓バッチ, padding mask) の列にする
@@ -222,19 +237,11 @@ def _collect_errors_and_labels(
     model.eval()
     errors = []
     labels = []
-    total_loss = 0
+    batch_losses = []
     with torch.inference_mode():
         for batch in loader:
-            batch.batch_edge_couples = batch.edge_label_index.t()
-            batch = batch.to(device)
-
-            embeddings = model.encoder(
-                batch.edge_index,
-                batch.edge_attr,
-                batch.batch_edge_couples,
-                batch.num_nodes,
-            )
-            labels.append(batch.edge_label.cpu())
+            embeddings, batch_labels = _encode_batch(model, batch, device)
+            labels.append(batch_labels)
             ae_loader = _window_batches(
                 embeddings, window_size, window_size, ae_batch_size, device
             )
@@ -248,13 +255,16 @@ def _collect_errors_and_labels(
                     accumulated_loss += loss
                 seq_count += 1
                 batch_errors = calculate_errors(outputs, ae_batch, mask)
-                errors.append(batch_errors.cpu())
+                # バッチごとの .cpu() は GPU 待ちになるので最後に 1 回だけ転送する
+                errors.append(batch_errors)
             if compute_loss and seq_count > 0:
-                total_loss += (accumulated_loss / seq_count).item()
+                batch_losses.append(accumulated_loss / seq_count)
+    total_loss = 0
     if compute_loss:
+        total_loss = _sum_scalars(batch_losses)
         total_loss /= len(loader)
-    labels = torch.cat(labels)
-    errors = torch.cat(errors)
+    labels = torch.cat(labels).cpu()
+    errors = torch.cat(errors).cpu()
     return total_loss, errors, labels
 
 
