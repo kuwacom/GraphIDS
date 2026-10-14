@@ -130,6 +130,7 @@ def test_find_threshold_supports_validation_f1_and_unsupervised_modes() -> None:
 
 def test_window_batches_match_sequential_dataset() -> None:
     embeddings = torch.randn(12, 3)
+    torch.manual_seed(0)
     expected = list(
         torch.utils.data.DataLoader(
             trainers_mod.SequentialDataset(embeddings, window=4, device="cpu"),
@@ -137,8 +138,12 @@ def test_window_batches_match_sequential_dataset() -> None:
             collate_fn=trainers_mod.collate_fn,
         )
     )
+    expected_rng_state = torch.get_rng_state()
+    torch.manual_seed(0)
     batches = trainers_mod._window_batches(embeddings, 4, 4, 2, "cpu")
 
+    # 乱数の消費量が変わると後続の shuffle が変わり学習結果がずれる
+    assert torch.equal(torch.get_rng_state(), expected_rng_state)
     assert len(batches) == len(expected)
     for (windows, mask), (expected_windows, expected_mask) in zip(
         batches, expected, strict=True

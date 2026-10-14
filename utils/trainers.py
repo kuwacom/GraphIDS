@@ -196,6 +196,9 @@ def _window_batches(embeddings, window_size, step, ae_batch_size, device):
         # 毎バッチの DataLoader 構築と全 True mask の生成を省く。mask を None にすると
         # 評価時に全 False の padding mask による nested tensor 変換も走らない
         windows = embeddings.reshape(num_edges // window_size, window_size, -1)
+        # 従来の内側 DataLoader は反復開始時にグローバル CPU 乱数から base_seed を 1 回
+        # 引いていた。同じだけ消費しないと以降の LinkNeighborLoader の shuffle が変わる
+        torch.empty((), dtype=torch.int64).random_()
         return [(chunk, None) for chunk in windows.split(ae_batch_size)]
     return DataLoader(
         SequentialDataset(embeddings, window=window_size, step=step, device=device),
