@@ -122,16 +122,33 @@ def find_threshold(errors, labels=None, method="unsupervised", multiplier=10.0):
         ).abs().median() * 1.4826  # Factor for normal distribution
         best_threshold = median + multiplier * mad
     elif method == "validation_f1" and labels is not None:
-        best_f1 = 0.0
+        # 500 候補を sklearn.f1_score で逐次評価すると val 58 万件で約 85 秒/epoch かかるため、
+        # 同じ候補・同じ選択規則(最初の最大・strict '>')のまま、ソート+searchsorted で一括計算する
+        errors = errors.detach().cpu()
+        labels = labels.detach().cpu().long()
+        thresholds = torch.linspace(errors.min(), errors.max(), steps=500)
+        pos = torch.sort(errors[labels == 1]).values
+        neg = torch.sort(errors[labels == 0]).values
+        n1, n0 = pos.numel(), neg.numel()
+        tp = (n1 - torch.searchsorted(pos, thresholds, right=True)).double()
+        fp = (n0 - torch.searchsorted(neg, thresholds, right=True)).double()
+        fn = n1 - tp
+        tn = n0 - fp
+
+        def _f1(t, a, b):
+            den = 2 * t + a + b
+            return torch.where(den > 0, 2 * t / den.clamp(min=1), torch.zeros_like(den))
+
+        # sklearn の macro は y_true/y_pred のどちらかに現れたクラスだけを平均する
+        has1 = ((tp + fn) > 0) | ((tp + fp) > 0)
+        has0 = ((tn + fp) > 0) | ((tn + fn) > 0)
+        macro = (_f1(tp, fp, fn) * has1 + _f1(tn, fn, fp) * has0) / (
+            has1.double() + has0.double()
+        )
         best_threshold = errors.mean()
-        for threshold in torch.linspace(errors.min(), errors.max(), steps=500):
-            val_pred = (errors > threshold).int()
-            f1 = f1_score(
-                labels.cpu(), val_pred.cpu(), average="macro", zero_division=0
-            )
-            if f1 > best_f1:
-                best_threshold = threshold.item()
-                best_f1 = f1
+        best = macro.max()
+        if best > 0:
+            best_threshold = thresholds[int((macro == best).nonzero()[0])].item()
     else:
         raise ValueError(
             "Invalid method for threshold finding. Use 'unsupervised' or "
