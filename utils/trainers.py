@@ -6,7 +6,7 @@ from sklearn.metrics import average_precision_score, f1_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from utils.dataloaders import SequentialDataset, collate_fn
+from utils.dataloaders import FullGraphBatch, SequentialDataset, collate_fn
 
 
 def train(
@@ -162,6 +162,11 @@ def _encode_batch(model, batch, device):
     """
     ローダのバッチから種エッジの埋め込みとラベル(CPU 上のまま)を返す
     """
+    if isinstance(batch, FullGraphBatch):
+        return (
+            model.encoder.embed_edges(batch.node_features, batch.edge_couples),
+            batch.edge_label,
+        )
     # encoder が使うテンソルだけを非同期で転送する。batch.to(device) の同期転送と
     # 未使用属性(x, e_id 等)の転送を避け、GPU 計算と次バッチの読み込みを重ねる
     edge_index = batch.edge_index.to(device, non_blocking=True)

@@ -9,7 +9,7 @@ from sklearn.metrics import precision_recall_curve
 from torch_geometric.loader import LinkNeighborLoader
 
 from models.graphids import GraphIDS
-from utils.dataloaders import NetFlowDataset
+from utils.dataloaders import FullGraphEdgeLoader, NetFlowDataset
 from utils.parser import Parser
 from utils.trainers import test, train
 
@@ -44,6 +44,7 @@ EXPERIMENT_CONFIG_KEYS = (
     "fraction",
     "split_mode",
     "distribution_segment",
+    "full_neighbor_agg",
 )
 RUNTIME_CONFIG_KEYS = (
     "data_dir",
@@ -57,6 +58,7 @@ RUNTIME_CONFIG_KEYS = (
 BACKWARD_COMPATIBLE_DEFAULT_KEYS = (
     "split_mode",
     "distribution_segment",
+    "full_neighbor_agg",
 )
 REQUIRED_CONFIG_KEYS = EXPERIMENT_CONFIG_KEYS + RUNTIME_CONFIG_KEYS
 
@@ -189,58 +191,46 @@ def main(run):
         torch.cuda.reset_peak_memory_stats()
     cpu_count = os.cpu_count()
     recommended_workers = min(cpu_count, 6) if cpu_count is not None else 0
+
+    def build_loader(graph, drop_last):
+        if config.full_neighbor_agg:
+            # 集約は重みに依存しないのでグラフ全体で 1 回だけ計算する。CPU で計算して
+            # GPU の scatter(加算順が非決定)による揺れを集約結果に持ち込まない
+            with torch.no_grad():
+                node_features = model.encoder.aggregate_edges(
+                    graph.edge_index, graph.edge_attr, graph.num_nodes
+                )
+            return FullGraphEdgeLoader(
+                graph,
+                node_features,
+                batch_size=config.batch_size,
+                shuffle=shuffle,
+                drop_last=drop_last,
+                num_workers=recommended_workers,
+                persistent_workers=True,
+                device=device,
+            )
+        return LinkNeighborLoader(
+            data=graph,
+            num_neighbors=fanout_list,
+            edge_label_index=graph.edge_index,
+            edge_label=graph.edge_labels,
+            batch_size=config.batch_size,
+            shuffle=shuffle,
+            num_workers=recommended_workers,
+            pin_memory=True,
+            persistent_workers=True,
+            drop_last=drop_last,
+        )
+
     if start_epoch >= config.num_epochs or config.test:
         print("Model already trained")
-        test_loader = LinkNeighborLoader(
-            data=dataset.test_graph,
-            num_neighbors=fanout_list,
-            edge_label_index=dataset.test_graph.edge_index,
-            edge_label=dataset.test_graph.edge_labels,
-            batch_size=config.batch_size,
-            shuffle=shuffle,
-            num_workers=recommended_workers,
-            pin_memory=True,
-            persistent_workers=True,
-            drop_last=False,
-        )
+        test_loader = build_loader(dataset.test_graph, drop_last=False)
         loaders = [test_loader]
     else:
-        train_loader = LinkNeighborLoader(
-            data=dataset.train_graph,
-            num_neighbors=fanout_list,
-            edge_label_index=dataset.train_graph.edge_index,
-            edge_label=dataset.train_graph.edge_labels,
-            batch_size=config.batch_size,
-            shuffle=shuffle,
-            num_workers=recommended_workers,
-            pin_memory=True,
-            persistent_workers=True,
-            drop_last=True,
-        )
-        val_loader = LinkNeighborLoader(
-            data=dataset.val_graph,
-            num_neighbors=fanout_list,
-            edge_label_index=dataset.val_graph.edge_index,
-            edge_label=dataset.val_graph.edge_labels,
-            batch_size=config.batch_size,
-            shuffle=shuffle,
-            num_workers=recommended_workers,
-            pin_memory=True,
-            persistent_workers=True,
-            drop_last=True,
-        )
-        test_loader = LinkNeighborLoader(
-            data=dataset.test_graph,
-            num_neighbors=fanout_list,
-            edge_label_index=dataset.test_graph.edge_index,
-            edge_label=dataset.test_graph.edge_labels,
-            batch_size=config.batch_size,
-            shuffle=shuffle,
-            num_workers=recommended_workers,
-            pin_memory=True,
-            persistent_workers=True,
-            drop_last=False,
-        )
+        train_loader = build_loader(dataset.train_graph, drop_last=True)
+        val_loader = build_loader(dataset.val_graph, drop_last=True)
+        test_loader = build_loader(dataset.test_graph, drop_last=False)
         loaders = [train_loader, val_loader, test_loader]
         print("Starting training...")
         model, threshold = train(

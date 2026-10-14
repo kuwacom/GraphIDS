@@ -6,6 +6,7 @@ from torch_geometric.loader import LinkNeighborLoader
 
 import utils.trainers as trainers_mod
 from models.graphids import GraphIDS
+from utils.dataloaders import FullGraphEdgeLoader
 from utils.trainers import find_threshold, train, validate
 from utils.trainers import test as evaluate_test
 
@@ -125,6 +126,55 @@ def test_find_threshold_supports_validation_f1_and_unsupervised_modes() -> None:
 
     with pytest.raises(ValueError):
         find_threshold(errors, method="validation_f1")
+
+
+def test_window_batches_match_sequential_dataset() -> None:
+    embeddings = torch.randn(12, 3)
+    expected = list(
+        torch.utils.data.DataLoader(
+            trainers_mod.SequentialDataset(embeddings, window=4, device="cpu"),
+            batch_size=2,
+            collate_fn=trainers_mod.collate_fn,
+        )
+    )
+    batches = trainers_mod._window_batches(embeddings, 4, 4, 2, "cpu")
+
+    assert len(batches) == len(expected)
+    for (windows, mask), (expected_windows, expected_mask) in zip(
+        batches, expected, strict=True
+    ):
+        assert mask is None
+        assert expected_mask.all()
+        assert torch.equal(windows, expected_windows)
+
+
+def test_full_graph_loader_matches_full_neighbor_sampling(toy_dataset) -> None:
+    dataset = toy_dataset["dataset"]
+    model = _make_model(dataset).eval()
+    graph = dataset.train_graph
+    node_features = model.encoder.aggregate_edges(
+        graph.edge_index, graph.edge_attr, graph.num_nodes
+    )
+    full_loader = FullGraphEdgeLoader(
+        graph,
+        node_features,
+        batch_size=4,
+        shuffle=False,
+        drop_last=False,
+        num_workers=0,
+        persistent_workers=False,
+        device="cpu",
+    )
+    sampled_loader = _make_loader(graph, batch_size=4, drop_last=False)
+
+    with torch.no_grad():
+        for full_batch, sampled_batch in zip(full_loader, sampled_loader, strict=True):
+            full_emb, full_labels = trainers_mod._encode_batch(model, full_batch, "cpu")
+            sampled_emb, sampled_labels = trainers_mod._encode_batch(
+                model, sampled_batch, "cpu"
+            )
+            torch.testing.assert_close(full_emb, sampled_emb)
+            assert torch.equal(full_labels, sampled_labels)
 
 
 def test_train_saves_checkpoint_on_tied_best_pr_auc(
