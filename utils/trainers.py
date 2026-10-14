@@ -73,18 +73,18 @@ def train(
         val_loss, val_errors, val_labels = validate(
             model, val_loader, ae_batch_size, window_size, device
         )
-        val_pr_auc = average_precision_score(val_labels.cpu(), val_errors.cpu())
+        has_positive = bool(val_labels.any())
+        # 正例が無い val では sklearn の AP は常に 0.0 になるので計算を省いて同じ値を使う
+        val_pr_auc = (
+            average_precision_score(val_labels.cpu(), val_errors.cpu())
+            if has_positive
+            else 0.0
+        )
         # Choose the operating threshold on the labeled validation split.
         threshold = find_threshold(val_errors, val_labels, method="validation_f1")
 
         # Keep saving the model if it produces the same or better validation PR-AUC
-        if val_pr_auc >= best_pr_auc:
-            model.save_checkpoint(
-                checkpoint,
-                optimizer=optimizer,
-                epoch=epoch,
-                threshold=threshold,
-            )
+        should_save = val_pr_auc >= best_pr_auc
 
         # Stop training if the validation PR-AUC does not improve for a number of epochs
         if val_pr_auc > best_pr_auc:
@@ -92,6 +92,16 @@ def train(
             cnt_wait = 0
         else:
             cnt_wait += 1
+        is_last_epoch = epoch == num_epochs or cnt_wait >= patience
+        # 正例が無い epoch の保存は AP 同点の上書きで、後の保存か最終 epoch の保存で
+        # 必ず置き換わるため、最終的に残る checkpoint を変えずに保存回数だけ減らせる
+        if should_save and (has_positive or is_last_epoch):
+            model.save_checkpoint(
+                checkpoint,
+                optimizer=optimizer,
+                epoch=epoch,
+                threshold=threshold,
+            )
         pbar.set_postfix(
             {
                 "train_loss": total_train_loss,
