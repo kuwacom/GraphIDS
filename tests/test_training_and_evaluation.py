@@ -6,7 +6,7 @@ from torch_geometric.loader import LinkNeighborLoader
 
 import utils.trainers as trainers_mod
 from models.graphids import GraphIDS
-from utils.dataloaders import FullGraphEdgeLoader
+from utils.dataloaders import DeviceEdgeAttrLinkLoader, FullGraphEdgeLoader
 from utils.trainers import find_threshold, train, validate
 from utils.trainers import test as evaluate_test
 
@@ -151,6 +151,29 @@ def test_window_batches_match_sequential_dataset() -> None:
         assert mask is None
         assert expected_mask.all()
         assert torch.equal(windows, expected_windows)
+
+
+def test_device_edge_attr_loader_matches_link_neighbor_loader(toy_dataset) -> None:
+    graph = toy_dataset["dataset"].train_graph
+    kwargs = {"num_neighbors": [2], "batch_size": 4, "shuffle": True}
+
+    torch.manual_seed(3)
+    expected = list(
+        LinkNeighborLoader(
+            data=graph,
+            edge_label_index=graph.edge_index,
+            edge_label=graph.edge_labels,
+            **kwargs,
+        )
+    )
+    torch.manual_seed(3)
+    batches = list(DeviceEdgeAttrLinkLoader(graph, "cpu", **kwargs))
+
+    assert len(batches) == len(expected)
+    for batch, expected_batch in zip(batches, expected, strict=True):
+        for key in ("edge_index", "edge_attr", "edge_label_index", "edge_label"):
+            assert torch.equal(batch[key], expected_batch[key])
+        assert batch.num_nodes == expected_batch.num_nodes
 
 
 def test_full_graph_loader_matches_full_neighbor_sampling(toy_dataset) -> None:

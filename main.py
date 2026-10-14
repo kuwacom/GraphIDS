@@ -6,10 +6,13 @@ import numpy as np
 import torch
 import wandb
 from sklearn.metrics import precision_recall_curve
-from torch_geometric.loader import LinkNeighborLoader
 
 from models.graphids import GraphIDS
-from utils.dataloaders import FullGraphEdgeLoader, NetFlowDataset
+from utils.dataloaders import (
+    DeviceEdgeAttrLinkLoader,
+    FullGraphEdgeLoader,
+    NetFlowDataset,
+)
 from utils.parser import Parser
 from utils.trainers import test, train
 
@@ -210,11 +213,10 @@ def main(run):
                 persistent_workers=True,
                 device=device,
             )
-        return LinkNeighborLoader(
-            data=graph,
+        return DeviceEdgeAttrLinkLoader(
+            graph,
+            device,
             num_neighbors=fanout_list,
-            edge_label_index=graph.edge_index,
-            edge_label=graph.edge_labels,
             batch_size=config.batch_size,
             shuffle=shuffle,
             num_workers=recommended_workers,

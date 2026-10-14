@@ -13,6 +13,7 @@ from torch.utils.data import Dataset as TorchDataset
 from torch_geometric.data import Data
 from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
 from torch_geometric.data.storage import GlobalStorage
+from torch_geometric.loader import LinkNeighborLoader
 
 from utils.shift_segments import (
     MS_PER_DAY,
@@ -56,6 +57,33 @@ class SequentialDataset(TorchDataset):
 
     def __len__(self):
         return max(0, (len(self.data) - 1) // self.step + 1)
+
+
+class DeviceEdgeAttrLinkLoader(LinkNeighborLoader):
+    """
+    近傍サンプリングは従来どおりワーカーで行い、edge 特徴だけを device 上で取り出すローダ
+
+    ワーカーに渡すグラフを構造(edge_index)だけにしても、サンプリング結果(サブグラフ・e_id)と
+    乱数の消費は LinkNeighborLoader と変わらない。従来ワーカーがしていた edge_attr の
+    index_select・プロセス間転送・pin・H2D(r1a-long で約 130MB/バッチ)をなくし、
+    同じ値の edge_attr[e_id] を device 上の gather で作る
+    """
+
+    def __init__(self, graph, device, **kwargs):
+        super().__init__(
+            data=Data(edge_index=graph.edge_index, num_nodes=graph.num_nodes),
+            edge_label_index=graph.edge_index,
+            edge_label=graph.edge_labels,
+            **kwargs,
+        )
+        self.device_edge_attr = graph.edge_attr.to(device)
+        self.feature_device = device
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            edge_ids = batch.e_id.to(self.feature_device, non_blocking=True)
+            batch.edge_attr = self.device_edge_attr[edge_ids]
+            yield batch
 
 
 class FullGraphBatch:
