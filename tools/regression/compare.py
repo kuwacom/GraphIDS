@@ -17,6 +17,7 @@ import os
 import numpy as np
 import torch
 from scipy.stats import spearmanr
+from sklearn.metrics import roc_auc_score
 
 SPEARMAN_MIN = 0.9999
 OWN_BAR_REL_MAX = 1e-4
@@ -55,10 +56,14 @@ def _tpr_table(errors, labels, attacks, own_bar):
         if name.lower() == "benign":
             continue
         sel = errors[attacks == name]
+        scores = np.concatenate([benign, sel])
+        truth = np.concatenate([np.zeros(benign.size), np.ones(sel.size)])
         table[name] = {
             "n": int(sel.size),
             "tpr_at_1pct_fpr": float((sel > fpr_bar).mean()),
             "tpr_at_own_bar": float((sel > own_bar).mean()),
+            # TPR が 0 や 1 に張り付くと差が見えないので順位ベースの AUROC も比べる
+            "auroc": float(roc_auc_score(truth, scores)),
         }
     return table, fpr_bar
 
@@ -141,9 +146,13 @@ def compare(dir_a, dir_b):
             "n": ra["n"],
             "tpr_at_1pct_fpr": [ra["tpr_at_1pct_fpr"], rb.get("tpr_at_1pct_fpr")],
             "tpr_at_own_bar": [ra["tpr_at_own_bar"], rb.get("tpr_at_own_bar")],
+            "auroc": [ra["auroc"], rb.get("auroc")],
         }
         tpr_equal &= ra["tpr_at_1pct_fpr"] == rb.get("tpr_at_1pct_fpr")
     res["attack_tpr"] = table
+    res["attack_auroc_max_abs_diff"] = max(
+        (abs(r["auroc"][0] - r["auroc"][1]) for r in table.values()), default=0.0
+    )
 
     exact = (
         bit_equal
@@ -204,6 +213,7 @@ def main():
         if r["tpr_at_1pct_fpr"][0] != r["tpr_at_1pct_fpr"][1]
     ]
     print(f"attack TPR@1%FPR differing types: {diff_attacks}")
+    print(f"attack AUROC max_abs_diff={res['attack_auroc_max_abs_diff']:.3e}")
     print(f"verdict: {v}")
 
 
