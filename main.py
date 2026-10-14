@@ -106,6 +106,20 @@ def resolve_checkpoint_path(config, run_name):
     return default_checkpoint_path(config, run_name)
 
 
+def shutdown_loader_workers(*loaders):
+    """
+    persistent_workers のワーカーを明示的に止める
+
+    インタプリタ終了時の後片付けに任せるとワーカー 1 本ごとに join のタイムアウト
+    (5 秒)を待ち、ローダ 3 本 x 6 ワーカーでプロセス終了が約 90 秒遅れる
+    """
+    for loader in loaders:
+        iterator = getattr(loader, "_iterator", None)
+        if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+            iterator._shutdown_workers()
+            loader._iterator = None
+
+
 def main(run):
     config = run.config
 
@@ -189,6 +203,7 @@ def main(run):
             persistent_workers=True,
             drop_last=False,
         )
+        loaders = [test_loader]
     else:
         train_loader = LinkNeighborLoader(
             data=dataset.train_graph,
@@ -226,6 +241,7 @@ def main(run):
             persistent_workers=True,
             drop_last=False,
         )
+        loaders = [train_loader, val_loader, test_loader]
         print("Starting training...")
         model, threshold = train(
             model,
@@ -252,6 +268,7 @@ def main(run):
         device,
         threshold=threshold,
     )
+    shutdown_loader_workers(*loaders)
     precision, recall, _ = precision_recall_curve(test_labels.cpu(), errors.cpu())
     if config.save_curve:
         run.log(
