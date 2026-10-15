@@ -136,6 +136,14 @@ class Parser(argparse.ArgumentParser):
             help="Use positional encoding for the Transformer",
         )
         self.add_argument(
+            "--full_neighbor_agg",
+            action="store_true",
+            help=(
+                "Aggregate over all neighbors of the whole graph instead of sampling "
+                "with --fanout (precomputed once; results can differ from sampling)"
+            ),
+        )
+        self.add_argument(
             "--agg_type",
             type=str,
             default="mean",

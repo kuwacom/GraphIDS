@@ -8,10 +8,12 @@ import torch
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
 from torch_geometric.data import Data
 from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
 from torch_geometric.data.storage import GlobalStorage
+from torch_geometric.loader import LinkNeighborLoader
 
 from utils.shift_segments import (
     MS_PER_DAY,
@@ -55,6 +57,87 @@ class SequentialDataset(TorchDataset):
 
     def __len__(self):
         return max(0, (len(self.data) - 1) // self.step + 1)
+
+
+class DeviceEdgeAttrLinkLoader(LinkNeighborLoader):
+    """
+    近傍サンプリングは従来どおりワーカーで行い、edge 特徴だけを device 上で取り出すローダ
+
+    ワーカーに渡すグラフを構造(edge_index)だけにしても、サンプリング結果(サブグラフ・e_id)と
+    乱数の消費は LinkNeighborLoader と変わらない。従来ワーカーがしていた edge_attr の
+    index_select・プロセス間転送・pin・H2D(r1a-long で約 130MB/バッチ)をなくし、
+    同じ値の edge_attr[e_id] を device 上の gather で作る
+    """
+
+    def __init__(self, graph, device, **kwargs):
+        super().__init__(
+            data=Data(edge_index=graph.edge_index, num_nodes=graph.num_nodes),
+            edge_label_index=graph.edge_index,
+            edge_label=graph.edge_labels,
+            **kwargs,
+        )
+        self.device_edge_attr = graph.edge_attr.to(device)
+        self.feature_device = device
+
+    def __iter__(self):
+        for batch in super().__iter__():
+            edge_ids = batch.e_id.to(self.feature_device, non_blocking=True)
+            batch.edge_attr = self.device_edge_attr[edge_ids]
+            yield batch
+
+
+class FullGraphBatch:
+    """FullGraphEdgeLoader が返す 1 バッチ(全ノードの集約特徴と種エッジ)"""
+
+    def __init__(self, node_features, edge_couples, edge_label):
+        self.node_features = node_features
+        self.edge_couples = edge_couples
+        self.edge_label = edge_label
+
+
+class FullGraphEdgeLoader(DataLoader):
+    """
+    近傍サンプリングをせず、グラフ全体の全近傍で集約した特徴から種エッジを埋め込むローダ
+
+    1 層 mean 集約は学習パラメータに依存しないので、node_features(全ノード分の集約結果)を
+    事前に 1 回だけ計算して device に置き、バッチごとには種エッジの index だけを渡す。
+    LinkNeighborLoader と同じく range(エッジ数) を DataLoader で回すので、同じ引数なら
+    乱数の消費・shuffle の並び・バッチ構成は LinkNeighborLoader と一致する
+    """
+
+    def __init__(
+        self,
+        graph,
+        node_features,
+        *,
+        batch_size,
+        shuffle,
+        drop_last,
+        num_workers,
+        persistent_workers,
+        device,
+    ):
+        super().__init__(
+            range(graph.edge_index.size(1)),
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            collate_fn=torch.tensor,
+        )
+        self.node_features = node_features.to(device)
+        self.edge_index = graph.edge_index.to(device)
+        self.edge_labels = graph.edge_labels
+        self.device = device
+
+    def __iter__(self):
+        for edge_ids in super().__iter__():
+            yield FullGraphBatch(
+                self.node_features,
+                self.edge_index[:, edge_ids.to(self.device)].t(),
+                self.edge_labels[edge_ids],
+            )
 
 
 class NetFlowDataset:

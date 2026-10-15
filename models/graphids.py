@@ -54,10 +54,24 @@ class SAGELayer(MessagePassing):
             3. For target edges: concat source & dest node embeddings
             4. Project to final edge embeddings: fc_edge + dropout
         """
+        node_embeddings = self.aggregate_edges(edge_index, edge_attr, num_nodes)
+        return self.embed_edges(node_embeddings, edge_couples)
+
+    def aggregate_edges(self, edge_index, edge_attr, num_nodes):
+        """
+        edge 特徴を宛先ノードへ平均集約する(学習パラメータを使わない)
+
+        重みに依存しないので、--full_neighbor_agg ではグラフ全体で 1 回だけ計算して使い回す
+        """
         # Aggregate edge features to nodes (DGL: fn.copy_e + fn.mean)
-        node_embeddings = self.propagate(  # type: ignore
+        return self.propagate(  # type: ignore
             edge_index, edge_attr=edge_attr, size=(num_nodes, num_nodes)
         )
+
+    def embed_edges(self, node_embeddings, edge_couples):
+        """
+        ノードに集約した edge 特徴から edge_couples の edge 埋め込みを計算する
+        """
         # Transform aggregated features and activate
         node_embeddings = self.relu(self.fc_neigh(node_embeddings))
 
